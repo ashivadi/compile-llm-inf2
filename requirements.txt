@@ -1,0 +1,4 @@
+torch-neuronx
+neuronx-cc
+transformers
+torch

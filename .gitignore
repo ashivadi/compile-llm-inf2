@@ -1,0 +1,5 @@
+gpt-j-6B/*
+gpt2-split/*
+opt-13b-split/*
+*.pt 
+*.lock
