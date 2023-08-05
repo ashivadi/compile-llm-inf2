@@ -1,5 +1,5 @@
-gpt-j-6B/*
-gpt2-split/*
-opt-13b-split/*
+gpt-j-6b/gpt-j-6B/
+gpt2/gpt2-split/
+opt13b/opt-13b-split/
 *.pt 
 *.lock
