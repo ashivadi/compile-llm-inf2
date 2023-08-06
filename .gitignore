@@ -1,5 +1,7 @@
 gpt-j-6b/gpt-j-6B/
 gpt2/gpt2-split/
 opt13b/opt-13b-split/
+*.png
+stable_diffusion21_wts/sd2_compile_dir_512/
 *.pt 
 *.lock
