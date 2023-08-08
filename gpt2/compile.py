@@ -28,5 +28,6 @@ def compile_gpt2(download=False):
     model_neuron.to_neuron()
     return model_neuron
 
-
+if __name__ == "__main__":
+    compile_gpt2(download=True)
 
