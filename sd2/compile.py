@@ -1,130 +1,191 @@
+# Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+# SPDX-License-Identifier: MIT-0
+
 import os
 os.environ["NEURON_FUSE_SOFTMAX"] = "1"
-
-import torch
-import torch.nn as nn
-import torch_neuronx
-import numpy as np
 import time
-from diffusers import StableDiffusionPipeline, DPMSolverMultistepScheduler
-from diffusers.models.unet_2d_condition import UNet2DConditionOutput
+import copy
+import torch
+import shutil
+import argparse
+import numpy as np
+import torch_neuronx
+import torch.nn as nn
+
+from wrapper import NeuronTextEncoder, UNetWrap, NeuronUNet, get_attention_scores
 from diffusers.models.cross_attention import CrossAttention
+from diffusers.models.unet_2d_condition import UNet2DConditionOutput
+from diffusers import StableDiffusionPipeline, DPMSolverMultistepScheduler
 
-COMPILER_WORKDIR_ROOT = 'stable_diffusion21_wts/sd2_compile_dir_512'
-model_id = "stabilityai/stable-diffusion-2-1-base"
+def compile_text_encoder(text_encoder, args):
+    print("Compiling text encoder...")
+    base_dir='text_encoder'
+    os.makedirs(os.path.join(args.checkpoints_path, base_dir), exist_ok=True)
+    os.makedirs(os.path.join(args.model_path, base_dir), exist_ok=True)
+    t = time.time()
+    # Apply the wrapper to deal with custom return type
+    text_encoder = NeuronTextEncoder(text_encoder)
 
-class UNetWrap(nn.Module):
-    def __init__(self, unet):
-        super().__init__()
-        self.unet = unet
+    # Compile text encoder
+    # This is used for indexing a lookup table in torch.nn.Embedding,
+    # so using random numbers may give errors (out of range).
+    emb = torch.tensor([[49406, 18376,   525,  7496, 49407,     0,     0,     0,     0,     0,
+            0,     0,     0,     0,     0,     0,     0,     0,     0,     0,
+            0,     0,     0,     0,     0,     0,     0,     0,     0,     0,
+            0,     0,     0,     0,     0,     0,     0,     0,     0,     0,
+            0,     0,     0,     0,     0,     0,     0,     0,     0,     0,
+            0,     0,     0,     0,     0,     0,     0,     0,     0,     0,
+            0,     0,     0,     0,     0,     0,     0,     0,     0,     0,
+            0,     0,     0,     0,     0,     0,     0]])
+    text_encoder_neuron = torch_neuronx.trace(
+        text_encoder.neuron_text_encoder, emb,
+        #compiler_workdir=os.path.join(args.checkpoints_path, base_dir),
+    )
 
-    def forward(self, sample, timestep, encoder_hidden_states, cross_attention_kwargs=None):
-        out_tuple = self.unet(sample, timestep, encoder_hidden_states, return_dict=False)
-        return out_tuple
+    # Save the compiled text encoder
+    text_encoder_filename = os.path.join(args.model_path, base_dir, 'model.pt')
+    torch.jit.save(text_encoder_neuron, text_encoder_filename)
 
-class NeuronUNet(nn.Module):
-    def __init__(self, unetwrap):
-        super().__init__()
-        self.unetwrap = unetwrap
-        self.config = unetwrap.unet.config
-        self.in_channels = unetwrap.unet.in_channels
-        self.device = unetwrap.unet.device
+    # delete unused objects
+    del text_encoder
+    del text_encoder_neuron
+    print(f"Done. Elapsed time: {(time.time()-t)*1000}ms")
 
-    def forward(self, sample, timestep, encoder_hidden_states, cross_attention_kwargs=None):
-        sample = self.unetwrap(sample, timestep.float().expand((sample.shape[0],)), encoder_hidden_states)[0]
-        return UNet2DConditionOutput(sample=sample)
+def compile_vae(decoder, args, dtype):
+    print("Compiling VAE...")
+    base_dir='vae_decoder'
+    os.makedirs(os.path.join(args.checkpoints_path, base_dir), exist_ok=True)
+    os.makedirs(os.path.join(args.model_path, base_dir), exist_ok=True)
+    t = time.time()
+    # Compile vae decoder
+    decoder_in = torch.randn([1, 4, 64, 64]).type(dtype)
+    decoder_neuron = torch_neuronx.trace(
+        decoder,
+        decoder_in,
+        #compiler_workdir=os.path.join(args.checkpoints_path, base_dir),
+    )
 
-class NeuronTextEncoder(nn.Module):
-    def __init__(self, text_encoder):
-        super().__init__()
-        self.neuron_text_encoder = text_encoder
-        self.config = text_encoder.config
-        self.dtype = text_encoder.dtype
-        self.device = text_encoder.device
+    # Save the compiled vae decoder
+    decoder_filename = os.path.join(args.model_path, base_dir, 'model.pt')
+    torch.jit.save(decoder_neuron, decoder_filename)
 
-    def forward(self, emb, attention_mask = None):
-        return [self.neuron_text_encoder(emb)['last_hidden_state']]
-    
+    # delete unused objects
+    del decoder
+    del decoder_neuron
+    print(f"Done. Elapsed time: {(time.time()-t)*1000}ms")
 
-# Optimized attention
-def get_attention_scores(self, query, key, attn_mask):       
-    dtype = query.dtype
+def compile_unet(unet, args, dtype):
+    print("Compiling U-Net...")
+    base_dir='unet'
+    os.makedirs(os.path.join(args.checkpoints_path, base_dir), exist_ok=True)
+    os.makedirs(os.path.join(args.model_path, base_dir), exist_ok=True)
+    t = time.time()
+    # Compile unet - BF16
+    sample_1b = torch.randn([1, 4, 64, 64]).type(dtype)
+    timestep_1b = torch.tensor(999).type(dtype).expand((1,))
+    encoder_hidden_states_1b = torch.randn([1, 77, 1024]).type(dtype)
+    example_inputs = sample_1b, timestep_1b, encoder_hidden_states_1b
 
-    if self.upcast_attention:
-        query = query.float()
-        key = key.float()
+    unet_neuron = torch_neuronx.trace(
+        unet,
+        example_inputs,
+        #compiler_workdir=os.path.join(args.checkpoints_path, base_dir),
+        compiler_args=["--model-type=unet-inference"]
+    )
 
-    # Check for square matmuls
-    if(query.size() == key.size()):
-        attention_scores = custom_badbmm(
-            key,
-            query.transpose(-1, -2)
-        )
+    # save compiled unet
+    unet_filename = os.path.join(args.model_path, base_dir, 'model.pt')
+    torch.jit.save(unet_neuron, unet_filename)
 
-        if self.upcast_softmax:
-            attention_scores = attention_scores.float()
+    # delete unused objects
+    del unet
+    del unet_neuron
+    print(f"Done. Elapsed time: {(time.time()-t)*1000}ms")
 
-        attention_probs = torch.nn.functional.softmax(attention_scores, dim=1).permute(0,2,1)
-        attention_probs = attention_probs.to(dtype)
+def compile_vae_post_quant_conv(post_quant_conv, args, dtype):
+    print("Compiling Post Quant Conv...")
+    base_dir='vae_post_quant_conv'
+    os.makedirs(os.path.join(args.checkpoints_path, base_dir), exist_ok=True)
+    os.makedirs(os.path.join(args.model_path, base_dir), exist_ok=True)
+    t = time.time()
 
-    else:
-        attention_scores = custom_badbmm(
-            query,
-            key.transpose(-1, -2)
-        )
+    # # Compile vae post_quant_conv
+    post_quant_conv_in = torch.randn([1, 4, 64, 64]).type(dtype)
+    post_quant_conv_neuron = torch_neuronx.trace(
+        post_quant_conv,
+        post_quant_conv_in,
+        #compiler_workdir=os.path.join(args.checkpoints_path, base_dir),
+    )
 
-        if self.upcast_softmax:
-            attention_scores = attention_scores.float()
+    # # Save the compiled vae post_quant_conv
+    post_quant_conv_filename = os.path.join(args.model_path, base_dir, 'model.pt')
+    torch.jit.save(post_quant_conv_neuron, post_quant_conv_filename)
 
-        attention_probs = torch.nn.functional.softmax(attention_scores, dim=-1)
-        attention_probs = attention_probs.to(dtype)
-        
-    return attention_probs
+    # delete unused objects
+    del post_quant_conv
+    del post_quant_conv_neuron
+    print(f"Done. Elapsed time: {(time.time()-t)*1000}ms")
 
-def custom_badbmm(a, b):
-    bmm = torch.bmm(a, b)
-    scaled = bmm * 0.125
-    return scaled
+if __name__=='__main__':
+    parser = argparse.ArgumentParser(description='Train the UNet on images and target masks')
+    parser.add_argument('--model-path', 
+                        type=str, 
+                        help="Path where we'll save the model", 
+                        default='sd21-model-wts')
+    parser.add_argument('--checkpoints-path', 
+                        type=str, 
+                        help="Path where we'll save the best model and cache", 
+                        default='sd21-checkpoints')
+    parser.add_argument('--dtype', 
+                        type=str, 
+                        choices=['bf16','fp32'], 
+                        default='bf16', 
+                        help="Datatype of the weights")
 
-if __name__ == "__main__":
-    # --- Load all compiled models ---
-    text_encoder_filename = os.path.join(COMPILER_WORKDIR_ROOT, 'text_encoder/model.pt')
-    decoder_filename = os.path.join(COMPILER_WORKDIR_ROOT, 'vae_decoder/model.pt')
-    unet_filename = os.path.join(COMPILER_WORKDIR_ROOT, 'unet/model.pt')
-    post_quant_conv_filename = os.path.join(COMPILER_WORKDIR_ROOT, 'vae_post_quant_conv/model.pt')
+    args = parser.parse_args()
 
-    pipe = StableDiffusionPipeline.from_pretrained(model_id, torch_dtype=torch.float32)
-    pipe.scheduler = DPMSolverMultistepScheduler.from_config(pipe.scheduler.config)
+    # make sure the checkpoint path exists
+    os.makedirs(args.checkpoints_path, exist_ok=True)
 
-    # Load the compiled UNet onto two neuron cores.
+    # Model ID for SD version pipeline
+    model_id = "stabilityai/stable-diffusion-2-1-base"
+
+    # --- Compile CLIP text encoder and save ---
+
+    dtype = torch.bfloat16 if args.dtype == 'bf16' else torch.float32
+    # Only keep the model being compiled in RAM to minimze memory pressure
+    pipe = StableDiffusionPipeline.from_pretrained(model_id, torch_dtype=dtype)
+    text_encoder = copy.deepcopy(pipe.text_encoder)
+    del pipe
+    compile_text_encoder(text_encoder, args)
+
+    # --- Compile VAE decoder and save ---
+
+    # Only keep the model being compiled in RAM to minimze memory pressure
+    pipe = StableDiffusionPipeline.from_pretrained(model_id, torch_dtype=dtype)
+    decoder = copy.deepcopy(pipe.vae.decoder)
+    del pipe
+    compile_vae(decoder, args, dtype)
+
+    # --- Compile UNet and save ---
+
+    pipe = StableDiffusionPipeline.from_pretrained(model_id, torch_dtype=dtype)
+
+    # Replace original cross-attention module with custom cross-attention module for better performance
+    CrossAttention.get_attention_scores = get_attention_scores
+
+    # Apply double wrapper to deal with custom return type
     pipe.unet = NeuronUNet(UNetWrap(pipe.unet))
-    device_ids = [0,1]
-    pipe.unet.unetwrap = torch_neuronx.DataParallel(torch.jit.load(unet_filename), device_ids, set_dynamic_batching=False)
-    # Load other compiled models onto a single neuron core.
-    pipe.text_encoder = NeuronTextEncoder(pipe.text_encoder)
-    pipe.text_encoder.neuron_text_encoder = torch.jit.load(text_encoder_filename)
-    pipe.vae.decoder = torch.jit.load(decoder_filename)
-    pipe.vae.post_quant_conv = torch.jit.load(post_quant_conv_filename)
 
-    # Run pipeline
-prompt = ["a photo of an astronaut riding a horse on mars",
-          "sonic on the moon",
-          "elvis playing guitar while eating a hotdog",
-          "saved by the bell",
-          "engineers eating lunch at the opera",
-          "panda eating bamboo on a plane",
-          "A digital illustration of a steampunk flying machine in the sky with cogs and mechanisms, 4k, detailed, trending in artstation, fantasy vivid colors",
-          "kids playing soccer at the FIFA World Cup"
-         ]
+    # Only keep the model being compiled in RAM to minimze memory pressure
+    unet = copy.deepcopy(pipe.unet.unetwrap)
+    del pipe
+    compile_unet(unet, args, dtype)
 
+    # --- Compile VAE post_quant_conv and save ---
 
-total_time = 0
-for i,x in enumerate(prompt):
-    start_time = time.time()
-    image = pipe(x).images[0]
-    total_time = total_time + (time.time()-start_time)
-    image.save(f"image-{i}.png")
-    print(f"Saved image image-{i}.png")
-print("Average time: ", np.round((total_time/len(prompt)), 2), "seconds")
-
-
+    # Only keep the model being compiled in RAM to minimze memory pressure
+    pipe = StableDiffusionPipeline.from_pretrained(model_id, torch_dtype=dtype)
+    post_quant_conv = copy.deepcopy(pipe.vae.post_quant_conv)
+    del pipe
+    compile_vae_post_quant_conv(post_quant_conv, args, dtype)
