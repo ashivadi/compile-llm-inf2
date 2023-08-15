@@ -1,0 +1,19 @@
+Emulate Docker CLI using podman. Create /etc/containers/nodocker to quiet msg.
+STEP 1/19: FROM public.ecr.aws/lts/ubuntu:20.04_stable
+STEP 2/19: ENV DEBIAN_FRONTEND=noninteractive
+--> Using cache a946cc4cfae172c1d5f717dec1f8f77c81be7109af5a52dd2c2eac814cd6ffe6
+--> a946cc4cfae
+STEP 3/19: ENV DEBCONF_NONINTERACTIVE_SEEN=true
+--> Using cache 2ed0b258f2dc57ca340952a13e374a051f168549d724cdc73877739bd539ce22
+--> 2ed0b258f2d
+STEP 4/19: RUN apt-get update
+--> Using cache e7c1d733dc931d3db2e66496403f22997ec5e0d476cb90be4e3f5dacc2bcbba2
+--> e7c1d733dc9
+STEP 5/19: RUN apt-get -y install linux-headers-$(uname -r)
+Reading package lists...
+Building dependency tree...
+Reading state information...
+E: Unable to locate package linux-headers-4.18.0-477.21.1.el8_8.x86_64
+E: Couldn't find any package by glob 'linux-headers-4.18.0-477.21.1.el8_8.x86_64'
+E: Couldn't find any package by regex 'linux-headers-4.18.0-477.21.1.el8_8.x86_64'
+Error: building at STEP "RUN apt-get -y install linux-headers-$(uname -r)": while running runtime: exit status 100
