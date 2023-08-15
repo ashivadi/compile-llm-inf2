@@ -1,0 +1,19 @@
+➜  rhel8-amibuild-inf2 git:(master) ✗ sudo yum install aws-neuronx-dkms -y    
+Updating Subscription Management repositories.
+Unable to read consumer identity
+
+This system is not registered with an entitlement server. You can use subscription-manager to register.
+
+Neuron YUM Repository                                                                                                       199 kB/s | 2.9 kB     00:00    
+Error: 
+ Problem: cannot install the best candidate for the job
+  - nothing provides dkms >= 1.95 needed by aws-neuronx-dkms-2.11.9.0-dkms.noarch
+(try to add '--skip-broken' to skip uninstallable packages or '--nobest' to use not only best candidate packages)
+➜  rhel8-amibuild-inf2 git:(master) ✗ sudo yum install aws-neuronx-dkms-2.* -y
+zsh: no matches found: aws-neuronx-dkms-2.*
+➜  rhel8-amibuild-inf2 git:(master) ✗ 
+
+
+➜  rhel8-amibuild-inf2 git:(master) ✗ neuron-ls
+FATA[0000] Failed to discover neuron devices             error="Unable to read device information from the driver. To make sure aws-neuronx-dkms is installed and the neuron driver is accessible, please follow the steps in the troubleshooting guide: https://awsdocs-neuron.readthedocs-hosted.com/en/latest/neuron-runtime/nrt-troubleshoot.html#neuron-driver-installation-fails."
+➜  rhel8-amibuild-inf2 git:(master) ✗ 
