@@ -1,3 +1,5 @@
+## From https://awsdocs-neuron.readthedocs-hosted.com/en/latest/general/setup/neuron-setup/pytorch/neuronx/amazon-linux/torch-neuronx-al2.html#setup-torch-neuronx-al2
+
 # Configure Linux for Neuron repository updates
 sudo tee /etc/yum.repos.d/neuron.repo > /dev/null <<EOF
 [neuron]
