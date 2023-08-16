@@ -18,6 +18,7 @@ sudo yum install kernel-devel-$(uname -r) kernel-headers-$(uname -r) -y
 sudo yum install git -y
 
 # install Neuron Driver
+sudo dnf install https://dl.fedoraproject.org/pub/epel/epel-release-latest-8.noarch.rpm 
 sudo yum install aws-neuronx-dkms-2.* -y
 
 # Install Neuron Runtime 
